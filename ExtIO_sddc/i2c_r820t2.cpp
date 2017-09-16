@@ -343,7 +343,7 @@ void R820T2_set_pll(uint32_t freq)
 	/* Calculate vco output divider */
 	for (div_num = 0; div_num < 5; div_num++)
 	{
-		vco_exact = freq << (div_num + 1);
+		vco_exact = (uint32_t) ((uint64_t) freq << (div_num + 1));  // https://stackoverflow.com/questions/7401888/why-doesnt-left-bit-shift-for-32-bit-integers-work-as-expected-when-used
 		if (vco_exact >= vco_min && vco_exact <= vco_max)
 		{
 			break;
@@ -351,7 +351,7 @@ void R820T2_set_pll(uint32_t freq)
 	}
 
 	/* Calculate the integer PLL feedback divider */
-	vco_exact = freq << (div_num + 1);
+	vco_exact = (uint32_t) ((uint64_t)freq << (div_num + 1));
 	nint = (uint8_t)((vco_exact + (pll_ref >> 16)) / pll_ref_2x);
 	vco_frac = vco_exact - pll_ref_2x * nint;
 
@@ -390,10 +390,10 @@ void R820T2_set_pll(uint32_t freq)
 		sdm = 0;
 		for (n_sdm = 0; n_sdm < 16; n_sdm++)
 		{
-			con_frac = pll_ref >> n_sdm;
+			con_frac = (uint32_t)((uint64_t)pll_ref >> n_sdm);
 			if (vco_frac >= con_frac)
 			{
-				sdm |= (uint16_t)(0x8000 >> n_sdm);
+				sdm |= (uint16_t)((uint64_t)0x8000 >> n_sdm);
 				vco_frac -= con_frac;
 				if (vco_frac == 0)
 					break;
