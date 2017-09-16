@@ -44,7 +44,7 @@ static int		giExtSrateIdx = 0;
 static unsigned gExtSampleRate = 8000000;
 
 
-volatile int64_t  glLOfreq = 8000000L;   // set 8Msps default
+volatile int64_t  glLOfreq = 1000000L;   // set 1Msps default
 volatile uint32_t gsmpfreq = FRQSMP;
 volatile uint32_t gADCfreq = 0;
 volatile uint32_t gR820Tref = 0;
@@ -217,6 +217,7 @@ bool UploadBufferFromDevice(UINT start_addr, USHORT count, UCHAR *data_buf, UCHA
 bool UpdateGPIO()
 {
 	UINT8 ddata[2];
+	bool r;
 	ddata[1] = (gled_overload * LED_OVERLOAD) |
 		(gled_modea * LED_MODEA) |
 		(gled_modeb * LED_MODEB) |
@@ -226,7 +227,10 @@ bool UpdateGPIO()
 		(gdith * DITH);
 	ggpioo = ddata[1];
 	ddata[0] = OUTXIO;
-	return DownloadBufferToDevice(0, 2, ddata, CY_FX_RQT_GPIO_WRITE);
+	r = DownloadBufferToDevice(0, 2, ddata, CY_FX_RQT_GPIO_WRITE);
+	DbgPrintf("\nUpdateGPIO() = %d", giAttIdxHF);
+	DbgPrintf("\t%01x %01x  ", gsel0, gsel1);
+	return r;
 }
 
 bool UpdateAGCPWM(double zero_one )
@@ -349,7 +353,7 @@ DWORD WINAPI USBThreadProc(__in  LPVOID lpParameter)
 	unsigned long Successes = 0;
 	unsigned long Failures = 0;
 
-	DbgPrintf("\n\n-USBThreadProc start");
+	DbgPrintf("\n\n-----------USBThreadProc start");
 #ifdef _USB_TIMING	
 	handleW = fopen("USBtiming.bin", "wb");
 #endif
@@ -464,7 +468,6 @@ DWORD WINAPI USBThreadProc(__in  LPVOID lpParameter)
 				long long rate = (long long)(iii * 16 * FRAMEN * 1000L) / dtime;
 				auto result2 = t2 - t3;
 				long long  dtime2 = (int) result2.count()/1000L  ;
-			//	long long  dtime2 = (int)result2.count() ;
 				int rate2 =(int) (long long)( 16 * FRAMEN * 1000L) / dtime2;
 				t3 = t2;
 				DbgPrintf("\r%lld  ", rate);
@@ -586,8 +589,22 @@ bool __declspec(dllexport) __stdcall InitHW(char *name, char *model, int& type)
 		gled_overload = 0;
 		gled_modea = 1;
 		gled_modeb = 1;
-		gsel0 = 1;
-		gsel1 = 0;
+		switch (giAttIdxHF)
+		{
+		case 0:
+			gsel0 = 1; //1 -uint8_t
+			gsel1 = 0;
+			break;
+		case 1:
+			gsel0 = 1;
+			gsel1 = 1;
+			break;
+		case 2:
+		default:
+			gsel0 = 0;
+			gsel1 = 1;
+			break;
+		}
 		gshdwn = 0;
 		gdith = 0;
 
@@ -814,15 +831,17 @@ int  EXTIO_API SetHWLO(long LOfreq)
 extern "C"
 int64_t EXTIO_API SetHWLO64(int64_t LOfreq)
 {
-	DbgPrintf("\n-SetHWLO64()");
+	//DbgPrintf("\n-SetHWLO64()");
 	// ..... set here the LO frequency in the controlled hardware
 	// Set here the frequency of the controlled hardware to LOfreq
     const int64_t wishedLO = LOfreq;
 	int64_t ret = 0;
 
 	int64_t loprecision;
-	loprecision = FRQSMP / gsmpfreq;
-	
+	if (LOfreq < HF_HIGH)
+		loprecision = gsmpfreq / FFTN;   // ie 64000000 / 1024 = bin span
+	else
+		loprecision = 1;
 	// calculate nearest possible frequency
 	// - emulate receiver which don't have 1 Hz resolution
 	LOfreq += loprecision/2 ;
