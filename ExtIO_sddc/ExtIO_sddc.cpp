@@ -426,7 +426,7 @@ DWORD WINAPI USBThreadProc(__in  LPVOID lpParameter)
 				Successes++;
 #endif
 
-				memcpy( mybuffer[(ii+1) % NVIA], &mybuffer[ii][1024 * 2 * 63], 1024 * 2);
+				memcpy( mybuffer[(ii+1) % NVIA], &mybuffer[ii][1024 * 2 * 64], 1024 * 2);   
 				if (wo >= womax)
 				{
 					pfnCallback((DFRAMEN), 0, 0.0F, &out2hdsdr[idxout][0][0]); //  output frame 
