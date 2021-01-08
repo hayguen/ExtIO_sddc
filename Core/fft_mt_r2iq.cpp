@@ -21,12 +21,32 @@ The name r2iq as Real 2 I+Q stream
 
 #include <string.h>
 #include <algorithm>
+#include <utility>
+
+// assure, that ADC is not oversteered?
+#define PRINT_INPUT_RANGE  0
+
 
 struct r2iqThreadArg {
+
+	r2iqThreadArg()
+	{
+#if PRINT_INPUT_RANGE
+		MinMaxBlockCount = 0;
+		MinValue = 0;
+		MaxValue = 0;
+#endif
+	}
+
 	float *ADCinTime;                // point to each threads input buffers [nftt][n]
 	fftwf_complex *ADCinFreq;         // buffers in frequency
 	fftwf_complex *inFreqTmp;         // tmp decimation output buffers (after tune shift)
 	fftwf_complex *outTimeTmp;        // tmp decimation output buffers baseband time cplx
+#if PRINT_INPUT_RANGE
+	int MinMaxBlockCount;
+	int16_t MinValue;
+	int16_t MaxValue;
+#endif
 };
 
 r2iqControlClass::r2iqControlClass()
@@ -289,26 +309,60 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 			*inloop++ = *endloop++;   // duplicate form last frame halfFft samples
 		}
 
+#if PRINT_INPUT_RANGE
+		std::pair<int16_t, int16_t> blockMinMax = std::make_pair<int16_t, int16_t>(0, 0);
+#endif
 		if (!this->getRand())        // plain samples no ADC rand set
 		{
-			for (int m = 0; m < transferSize / sizeof(int16_t); m++) {
+#if PRINT_INPUT_RANGE
+			auto minmax = std::minmax_element(dataADC, dataADC + transferSamples);
+			blockMinMax.first = *minmax.first;
+			blockMinMax.second = *minmax.second;
+#endif
+			for (int m = 0; m < transferSamples; m++)
+			{
 				*inloop++ = *dataADC++;
 			}
 		}
 		else
 		{
-			for (int m = 0; m < transferSize / sizeof(int16_t); m++) {
+			for (int m = 0; m < transferSamples; m++)
+			{
+#if PRINT_INPUT_RANGE
+				int16_t smp = RandTable[(uint16_t)*dataADC++];
+				blockMinMax.first = std::min(blockMinMax.first, smp);
+				blockMinMax.second = std::max(blockMinMax.second, smp);
+				*inloop++ = smp;
+#else
 				*inloop++ = (RandTable[(uint16_t)*dataADC++]);
+#endif
 			}
 		}
 
+#if PRINT_INPUT_RANGE
+		th->MinValue = std::min(blockMinMax.first, th->MinValue);
+		th->MaxValue = std::max(blockMinMax.second, th->MaxValue);
+		++th->MinMaxBlockCount;
+		if (th->MinMaxBlockCount * processor_count / 3 >= DEFAULT_TRANSFERS_PER_SEC )
+		{
+			float minBits = (th->MinValue < 0) ? (log10f((float)(-th->MinValue)) / log10f(2.0f)) : -1.0f;
+			float maxBits = (th->MaxValue > 0) ? (log10f((float)(th->MaxValue)) / log10f(2.0f)) : -1.0f;
+			printf("r2iq: min = %d (%.1f bits) %.2f%%, max = %d (%.1f bits) %.2f%%\n",
+				(int)th->MinValue, minBits, th->MinValue *-100.0f / 32768.0f,
+				(int)th->MaxValue, maxBits, th->MaxValue * 100.0f / 32768.0f);
+			th->MinValue = 0;
+			th->MaxValue = 0;
+			th->MinMaxBlockCount = 0;
+		}
+#endif
+
 		// decimate in frequency plus tuning
 
-		// Caculate the parameters for the first half
+		// Calculate the parameters for the first half
 		auto count = std::min(mfft/2, halfFft - _mtunebin);
 		auto source = &th->ADCinFreq[_mtunebin];
 
-		// Caculate the parameters for the second half
+		// Calculate the parameters for the second half
 		auto start = std::max(0, mfft / 2 - _mtunebin);
 		auto source2 = &th->ADCinFreq[_mtunebin - mfft / 2];
 		auto filter2 = &filter[halfFft - mfft / 2];
