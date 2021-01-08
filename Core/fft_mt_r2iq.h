@@ -28,7 +28,7 @@ private:
     r2iqThreadArg* lastThread;
 
     float GainScale;
-    int mfftdim [NDECIDX]; // FFT N dimensions: mfftdim[k] = halfFft / 2^k
+    int mInvFftDim[NDECIDX]; // FFT N dimensions: mfftdim[k] = halfFft / 2^k
     int mtunebin;
 
     void *r2iqThreadf(r2iqThreadArg *th);   // thread function
@@ -38,7 +38,6 @@ private:
     fftwf_complex **filterHw;       // Hw complex to each decimation ratio
 
 	fftwf_plan plan_t2f_r2c;          // fftw plan buffers Freq to Time complex to complex per decimation ratio
-	fftwf_plan *plan_f2t_c2c;          // fftw plan buffers Time to Freq real to complex per buffer
 	fftwf_plan plans_f2t_c2c[NDECIDX];
 
     uint32_t processor_count;

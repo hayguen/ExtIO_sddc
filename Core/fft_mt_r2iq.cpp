@@ -86,10 +86,10 @@ fft_mt_r2iq::fft_mt_r2iq() :
 	fftPerBuf = transferSize / sizeof(short) / (3 * halfFft / 2) + 1; // number of ffts per buffer with 256|768 overlap
 
 	mtunebin = halfFft / 4;
-	mfftdim[0] = halfFft;
+	mInvFftDim[0] = halfFft;
 	for (int i = 1; i < NDECIDX; i++)
 	{
-		mfftdim[i] = mfftdim[i - 1] / 2;
+		mInvFftDim[i] = mInvFftDim[i - 1] / 2;
 	}
 	GainScale = BBRF103_GAINFACTOR;
 
@@ -261,7 +261,7 @@ void fft_mt_r2iq::Init(float gain, int16_t **buffers, float** obuffers)
 		plan_t2f_r2c = fftwf_plan_dft_r2c_1d(2 * halfFft, threadArgs[0]->ADCinTime, threadArgs[0]->ADCinFreq, FFTW_MEASURE);
 		for (int d = 0; d < NDECIDX; d++)
 		{
-			plans_f2t_c2c[d] = fftwf_plan_dft_1d(mfftdim[d], threadArgs[0]->inFreqTmp, threadArgs[0]->outTimeTmp, FFTW_BACKWARD, FFTW_MEASURE);
+			plans_f2t_c2c[d] = fftwf_plan_dft_1d(mInvFftDim[d], threadArgs[0]->inFreqTmp, threadArgs[0]->outTimeTmp, FFTW_BACKWARD, FFTW_MEASURE);
 		}
 	}
 }
@@ -269,11 +269,11 @@ void fft_mt_r2iq::Init(float gain, int16_t **buffers, float** obuffers)
 void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 
 	const int decimate = this->mdecimation;
-	const int mfft = this->mfftdim[decimate];	// = halfFft / 2^mdecimation
+	const int invFftDim= this->mInvFftDim[decimate];	// = halfFft / 2^mdecimation
 	const int mratio = this->getRatio();
 	const fftwf_complex* filter = filterHw[decimate];
 	const bool lsb = this->getSideband();
-	plan_f2t_c2c = &plans_f2t_c2c[decimate];
+	fftwf_plan &plan_f2t_c2c = plans_f2t_c2c[decimate];
 
 	while (r2iqOn) {
 		const int16_t *dataADC;  // pointer to input data
@@ -373,14 +373,14 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 		// decimate in frequency plus tuning
 
 		// Calculate the parameters for the first half
-		const auto count = std::min(mfft/2, halfFft - _mtunebin);
+		const auto count = std::min(invFftDim /2, halfFft - _mtunebin);
 		const auto source = &th->ADCinFreq[_mtunebin];
 
 		// Calculate the parameters for the second half
-		const auto start = std::max(0, mfft / 2 - _mtunebin);
-		const auto source2 = &th->ADCinFreq[_mtunebin - mfft / 2];
-		const auto filter2 = &filter[halfFft - mfft / 2];
-		const auto dest = &th->inFreqTmp[mfft / 2];
+		const auto start = std::max(0, invFftDim / 2 - _mtunebin);
+		const auto source2 = &th->ADCinFreq[_mtunebin - invFftDim / 2];
+		const auto filter2 = &filter[halfFft - invFftDim / 2];
+		const auto dest = &th->inFreqTmp[invFftDim / 2];
 		for (int k = 0; k < fftPerBuf; k++)
 		{
 			// core of fast convolution including filter and decimation
@@ -403,11 +403,11 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 						th->inFreqTmp[m][1] = (source[m][1] * filter[m][0] -
 							source[m][0] * filter[m][1]);
 					}
-					if (mfft / 2 != count)
-						memset(th->inFreqTmp[count], 0, sizeof(float) * 2 * (mfft / 2 - count));
+					if (invFftDim / 2 != count)
+						memset(th->inFreqTmp[count], 0, sizeof(float) * 2 * (invFftDim / 2 - count));
 
 					// circular shift tune fs/2 second half array
-					for (int m = start; m < mfft / 2; m++)
+					for (int m = start; m < invFftDim / 2; m++)
 					{
 						// also do complex multiplication with the lowpass filter's spectrum
 						dest[m][0] = (source2[m][0] * filter2[m][0] +
@@ -416,14 +416,14 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 							source2[m][0] * filter2[m][1]);
 					}
 					if (start != 0)
-						memset(th->inFreqTmp[mfft / 2], 0, sizeof(float) * 2 * start);
+						memset(th->inFreqTmp[invFftDim / 2], 0, sizeof(float) * 2 * start);
 
 				}
 				// result now in th->inFreqTmp[]
 
 				// 'shorter' inverse FFT transform (decimation); frequency (back) to COMPLEX time domain
-				// transform size: mfft = mfftdim[k] = halfFft / 2^k with k = mdecimation
-				fftwf_execute_dft(*plan_f2t_c2c, th->inFreqTmp, th->outTimeTmp);     //  c2c decimation
+				// transform size: invFftDim = mInvFftDim[k] = halfFft / 2^k with k = mdecimation
+				fftwf_execute_dft(plan_f2t_c2c, th->inFreqTmp, th->outTimeTmp);     //  c2c decimation
 					// result now in th->outTimeTmp[]
 			}
 
@@ -446,8 +446,8 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 				// mirror just by negating the imaginary Q of complex I/Q
 				if (k == 0)
 				{
-					auto pTimeTmp = th->outTimeTmp[mfft / 4];
-					for (int i = 0; i < mfft / 2; i++)
+					auto pTimeTmp = th->outTimeTmp[invFftDim / 4];
+					for (int i = 0; i < invFftDim / 2; i++)
 					{
 						*pout++ = *pTimeTmp++;
 						*pout++ = -*pTimeTmp++;
@@ -456,7 +456,7 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 				else
 				{
 					auto pTimeTmp = th->outTimeTmp[0];
-					for (int i = 0; i < 3 * mfft / 4; i++)
+					for (int i = 0; i < 3 * invFftDim / 4; i++)
 					{
 						*pout++ = *pTimeTmp++;
 						*pout++ = -*pTimeTmp++;
@@ -468,8 +468,8 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 				// simple memcpy() calls are sufficient (possibly faster?)
 				if (k == 0)
 				{
-					auto pTimeTmp = th->outTimeTmp[mfft / 4];
-					for (int i = 0; i < mfft / 2; i++)
+					auto pTimeTmp = th->outTimeTmp[invFftDim / 4];
+					for (int i = 0; i < invFftDim / 2; i++)
 					{
 						*pout++ = *pTimeTmp++;
 						*pout++ = *pTimeTmp++;
@@ -478,7 +478,7 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 				else
 				{
 					auto pTimeTmp = th->outTimeTmp[0];
-					for (int i = 0; i < 3 * mfft / 4; i++)
+					for (int i = 0; i < 3 * invFftDim / 4; i++)
 					{
 						*pout++ = *pTimeTmp++;
 						*pout++ = *pTimeTmp++;
