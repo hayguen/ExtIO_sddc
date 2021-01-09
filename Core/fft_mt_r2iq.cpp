@@ -27,6 +27,25 @@ The name r2iq as Real 2 I+Q stream
 // assure, that ADC is not oversteered?
 #define PRINT_INPUT_RANGE  0
 
+// default was 1
+// 0 re-uses the real fft plan
+#define FILTER_SPEC_WITH_CPLX_FFT  1
+#if FILTER_SPEC_WITH_CPLX_FFT
+// when creating new plan anyway .. 1 or 2 allowed.  1 performs better
+#define FILTER_DIM_FACTOR  1
+#else
+// when re-using real fft plan, this must be factor 2
+#define FILTER_DIM_FACTOR  2
+#endif
+
+
+#define CPLX_FFTW_MUL(RESULT, A, B) \
+  do { \
+    RESULT[0] = A[0] * B[0] + A[1] * B[1]; \
+    RESULT[1] = A[1] * B[0] - A[0] * B[1]; \
+  } while (0)
+
+
 struct r2iqThreadArg {
 
 	r2iqThreadArg()
@@ -121,7 +140,6 @@ fft_mt_r2iq::~fft_mt_r2iq()
 	{
 		fftwf_free(filterHw[d]);     // 4096
 	}
-	fftwf_free(filterHw);
 
 	fftwf_destroy_plan(plan_t2f_r2c);
 	for (int d = 0; d < NDECIDX; d++)
@@ -204,25 +222,50 @@ void fft_mt_r2iq::Init(float gain, int16_t **buffers, float** obuffers)
 	if (processor_count > N_MAX_R2IQ_THREADS)
 		processor_count = N_MAX_R2IQ_THREADS;
 
+	// prepare all FFTs - before filter design in case FILTER_SPEC_WITH_CPLX_FFT == 0
 	{
-		fftwf_plan filterplan_t2f_c2c; // time to frequency fft
-
-		DbgPrintf((char *) "r2iqCntrl initialization\n");
-
-
-		//        DbgPrintf((char *) "RandTable generated\n");
-
-		   // filters
-		fftwf_complex *pfilterht;       // time filter ht
-		pfilterht = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex)*halfFft);     // halfFft
-		filterHw = (fftwf_complex**)fftwf_malloc(sizeof(fftwf_complex*)*NDECIDX);
-		for (int d = 0; d < NDECIDX; d++)
+		for (unsigned t = 0; t < processor_count; t++)
 		{
-			filterHw[d] = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex)*halfFft);     // halfFft
+			r2iqThreadArg* th = new r2iqThreadArg();
+			threadArgs[t] = th;
+
+			th->ADCinTime = (float*)fftwf_malloc(sizeof(float) * (halfFft + transferSamples));
+			th->ADCinFreq = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * (halfFft + 1)); // 4096+1
+			th->inFreqTmp = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * (halfFft));    // 4096
+			th->outTimeTmp = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * (halfFft));
 		}
 
-		filterplan_t2f_c2c = fftwf_plan_dft_1d(halfFft, pfilterht, filterHw[0], FFTW_FORWARD, FFTW_MEASURE);
-		float *pht = new float[halfFft / 4 + 1];
+		plan_t2f_r2c = fftwf_plan_dft_r2c_1d(2 * halfFft, threadArgs[0]->ADCinTime, threadArgs[0]->ADCinFreq, FFTW_MEASURE);
+		for (int d = 0; d < NDECIDX; d++)
+		{
+			plans_f2t_c2c[d] = fftwf_plan_dft_1d(mInvFftDim[d], threadArgs[0]->inFreqTmp, threadArgs[0]->outTimeTmp, FFTW_BACKWARD, FFTW_MEASURE);
+		}
+	}
+
+	// design lowpass filter and compute it's spectrum
+	{
+		DbgPrintf((char*)"r2iqCntrl initialization\n");
+		const int filterTaps = halfFft / 4 + 1;
+		const int filterFftDim = FILTER_DIM_FACTOR * halfFft;  // initially just halfFft
+
+		// filters
+		for (int d = 0; d < NDECIDX; d++)
+		{
+			filterHw[d] = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * filterFftDim);     // halfFft
+		}
+#if FILTER_SPEC_WITH_CPLX_FFT
+		fftwf_complex* pfilterht;       // time filter ht
+		pfilterht = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * filterFftDim);     // halfFft
+
+		fftwf_plan filterplan_t2f_c2c; // time to frequency fft
+		filterplan_t2f_c2c = fftwf_plan_dft_1d(filterFftDim, pfilterht, filterHw[0], FFTW_FORWARD, FFTW_MEASURE);
+		float* pht = new float[filterTaps];
+		//const float gainadj = gain / sqrtf(2.0f) * 2048.0f / (float)FFTN_R_ADC; // reference is FFTN_R_ADC == 2048
+		const float gainadj = gain * 2048.0f / (float)FFTN_R_ADC; // reference is FFTN_R_ADC == 2048
+#else
+		float* pht = threadArgs[0]->ADCinTime;
+		const float gainadj = gain * 2048.0f / (float)FFTN_R_ADC; // reference is FFTN_R_ADC == 2048
+#endif
 		const float Astop = 120.0f;
 		const float relPass = 0.85f;  // 85% of Nyquist should be usable
 		const float relStop = 1.1f;   // 'some' alias back into transition band is OK
@@ -232,37 +275,37 @@ void fft_mt_r2iq::Init(float gain, int16_t **buffers, float** obuffers)
 			//   to allow same stopband-attenuation for all decimations
 			float Bw = 64.0f / mratio[d];
 			// Bw *= 0.8f;  // easily visualize Kaiser filter's response
-			KaiserWindow(halfFft / 4 + 1, Astop, relPass * Bw / 128.0f, relStop * Bw / 128.0f, pht);
+#if FILTER_SPEC_WITH_CPLX_FFT
+			for (int t = 0; t < filterFftDim; t++)
+				pfilterht[t][0] = pfilterht[t][1] = 0.0f;
 
-			float gainadj = gain  / sqrtf(2.0f) * 2048.0f / (float)FFTN_R_ADC; // reference is FFTN_R_ADC == 2048
+			KaiserWindow(filterTaps, Astop, relPass * Bw / 128.0f, relStop * Bw / 128.0f, pht, gainadj);
 
-			for (int t = 0; t < (halfFft/4+1); t++)
-			{
-				pfilterht[t][0] = pfilterht[t][1] = gainadj * pht[t];
-			}
+			for (int t = 0; t < filterTaps; t++)
+				pfilterht[t][0] = pht[t];
 
 			fftwf_execute_dft(filterplan_t2f_c2c, pfilterht, filterHw[d]);
+#else
+			for (int t = 0; t < filterFftDim; t++)
+				pht[t] = 0.0f;
+
+			KaiserWindow(filterTaps, Astop, relPass * Bw / 128.0f, relStop * Bw / 128.0f, pht, gainadj);
+
+			// fft input size: 2*halfFft
+			fftwf_execute_dft_r2c(plan_t2f_r2c, pht, filterHw[d]);
+			for (int t = 1; t < filterFftDim / 2; t++)
+			{
+				// copy and conjugate bins for 'negative' frequencies
+				filterHw[d][filterFftDim - t][0] = filterHw[d][t][0];
+				filterHw[d][filterFftDim - t][1] = -filterHw[d][t][1];
+			}
+#endif
 		}
+#if FILTER_SPEC_WITH_CPLX_FFT
 		delete[] pht;
 		fftwf_destroy_plan(filterplan_t2f_c2c);
 		fftwf_free(pfilterht);
-
-		for (unsigned t = 0; t < processor_count; t++) {
-			r2iqThreadArg *th = new r2iqThreadArg();
-			threadArgs[t] = th;
-
-			th->ADCinTime = (float*)fftwf_malloc(sizeof(float) * (halfFft + transferSize / 2));                 // 2048
-
-			th->ADCinFreq = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex)*(halfFft + 1)); // 1024+1
-			th->inFreqTmp = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex)*(halfFft));    // 1024
-			th->outTimeTmp = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex)*(halfFft));
-		}
-
-		plan_t2f_r2c = fftwf_plan_dft_r2c_1d(2 * halfFft, threadArgs[0]->ADCinTime, threadArgs[0]->ADCinFreq, FFTW_MEASURE);
-		for (int d = 0; d < NDECIDX; d++)
-		{
-			plans_f2t_c2c[d] = fftwf_plan_dft_1d(mInvFftDim[d], threadArgs[0]->inFreqTmp, threadArgs[0]->outTimeTmp, FFTW_BACKWARD, FFTW_MEASURE);
-		}
+#endif
 	}
 }
 
@@ -271,7 +314,8 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 	const int decimate = this->mdecimation;
 	const int invFftDim= this->mInvFftDim[decimate];	// = halfFft / 2^mdecimation
 	const int mratio = this->getRatio();
-	const fftwf_complex* filter = filterHw[decimate];
+	const fftwf_complex* filterHwPos = filterHw[decimate];
+	const int filterFftDim = FILTER_DIM_FACTOR * halfFft;  // initially just halfFft
 	const bool lsb = this->getSideband();
 	fftwf_plan &plan_f2t_c2c = plans_f2t_c2c[decimate];
 
@@ -379,7 +423,7 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 		// Calculate the parameters for the second half
 		const auto start = std::max(0, invFftDim / 2 - _mtunebin);
 		const auto source2 = &th->ADCinFreq[_mtunebin - invFftDim / 2];
-		const auto filter2 = &filter[halfFft - invFftDim / 2];
+		const auto filterHwNeg = &filterHwPos[filterFftDim - invFftDim / 2];
 		const auto dest = &th->inFreqTmp[invFftDim / 2];
 		for (int k = 0; k < fftPerBuf; k++)
 		{
@@ -398,10 +442,7 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 					for (int m = 0; m < count; m++)
 					{
 						// besides circular shift, do complex multiplication with the lowpass filter's spectrum
-						th->inFreqTmp[m][0] = (source[m][0] * filter[m][0] +
-							source[m][1] * filter[m][1]);
-						th->inFreqTmp[m][1] = (source[m][1] * filter[m][0] -
-							source[m][0] * filter[m][1]);
+						CPLX_FFTW_MUL(th->inFreqTmp[m], source[m], filterHwPos[m]);
 					}
 					if (invFftDim / 2 != count)
 						memset(th->inFreqTmp[count], 0, sizeof(float) * 2 * (invFftDim / 2 - count));
@@ -410,14 +451,10 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 					for (int m = start; m < invFftDim / 2; m++)
 					{
 						// also do complex multiplication with the lowpass filter's spectrum
-						dest[m][0] = (source2[m][0] * filter2[m][0] +
-							source2[m][1] * filter2[m][1]);
-						dest[m][1] = (source2[m][1] * filter2[m][0] -
-							source2[m][0] * filter2[m][1]);
+						CPLX_FFTW_MUL(dest[m], source2[m], filterHwNeg[m]);
 					}
 					if (start != 0)
 						memset(th->inFreqTmp[invFftDim / 2], 0, sizeof(float) * 2 * start);
-
 				}
 				// result now in th->inFreqTmp[]
 

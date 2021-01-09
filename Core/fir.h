@@ -1,3 +1,3 @@
 #pragma once
 
-int KaiserWindow(int num_taps, float Astop, float normFpass, float normFstop, float * Coef);
+int KaiserWindow(const int num_taps, const float Astop, const float normFpass, const float normFstop, float* Coef, const float Scale = 1.0f);

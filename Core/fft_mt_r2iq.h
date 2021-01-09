@@ -35,7 +35,7 @@ private:
 
     int halfFft;    // half the size of the first fft at ADC 64Msps real rate (2048)
     int fftPerBuf; // number of ffts per buffer with 256|768 overlap
-    fftwf_complex **filterHw;       // Hw complex to each decimation ratio
+    fftwf_complex *filterHw[NDECIDX]; // Hw complex to each decimation ratio
 
 	fftwf_plan plan_t2f_r2c;          // fftw plan buffers Freq to Time complex to complex per decimation ratio
 	fftwf_plan plans_f2t_c2c[NDECIDX];

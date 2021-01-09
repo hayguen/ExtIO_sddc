@@ -45,15 +45,10 @@ static float Izero(float x)
 //                    Fpass   Fstop
 //
 ////////////////////////////////////////////////////////////////////
-int KaiserWindow(int num_taps, float Astop, float normFpass, float normFstop, float *Coef)
+int KaiserWindow(const int num_taps, const float Astop, const float normFpass, const float normFstop, float *Coef, const float Scale)
 {
     int n;
     float Beta;
-
-    float Scale = 1.0f; //+106dB over 1.0 to have high level in wavosaur spectrum analisys out. otherwise set to 1.0
-//    float Astop = 100.0f; // we want high attenuation 100 dB
-
-    //create normalized frequency parameters
     float normFcut = (normFstop + normFpass) / 2.0f;   //low pass filter 6dB cutoff
 
     //calculate Kaiser-Bessel window shape factor, Beta, from stopband attenuation
@@ -70,7 +65,7 @@ int KaiserWindow(int num_taps, float Astop, float normFpass, float normFstop, fl
     */
 
     // now estimate number of filter taps required based on filter specs
-    int m_NumTaps = (Astop - 8.0) / (2.285*K_2PI*(normFstop - normFpass) ) + 1;
+    int m_NumTaps = (Astop - 8.0f) / (2.285f*K_2PI*(normFstop - normFpass) ) + 1;
 
     // clamp range of filter taps
     if (num_taps < 0 && m_NumTaps > -num_taps)
