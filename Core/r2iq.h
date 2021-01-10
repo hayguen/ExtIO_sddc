@@ -26,7 +26,7 @@ public:
 
     void setDecimate(int dec) {this->mdecimation = dec; }
 
-    virtual void Init(float gain, int16_t** buffers, float** obuffers) {}
+    virtual void Init(float gain, int16_t** buffers, float* obuffers, int * num_joint_obuffers, int * joint_num_samples) {}
     virtual void TurnOn() { this->r2iqOn = true; }
     virtual void TurnOff(void) { this->r2iqOn = false; }
     virtual bool IsOn(void) { return this->r2iqOn; }

@@ -33,10 +33,12 @@ void RadioHandlerClass::OnDataPacket(int idx)
 		std::unique_lock<std::mutex> lk(fc_mutex);
 		if (fc != 0.0f)
 		{
-			shift_limited_unroll_C_sse_inp_c((complexf*)obuffers[oidx], EXT_BLOCKLEN, stateFineTune);
+			shift_limited_unroll_C_sse_inp_c((complexf*)obuffers_all, EXT_BLOCKLEN, stateFineTune);
+			//int num_joint_obuffers;
+			//int joint_num_samples;
 		}
 
-    	Callback(obuffers[oidx], EXT_BLOCKLEN);
+		Callback(obuffers_all, EXT_BLOCKLEN);
 
 		SamplesXIF += EXT_BLOCKLEN;
 	}
@@ -124,11 +126,10 @@ RadioHandlerClass::RadioHandlerClass() :
 	adcrate(DEFAULT_ADC_FREQ),
 	hardware(new DummyRadio())
 {
+	// Allocate the buffers for the output queue
+	obuffers_all = new float[transferSamples* QUEUE_SIZE];
 	for (int i = 0; i < QUEUE_SIZE; i++) {
-		buffers[i] = new int16_t[transferSize / sizeof(int16_t)];
-
-		// Allocate the buffers for the output queue
-		obuffers[i] = new float[transferSize / 2];
+		buffers[i] = new int16_t[transferSamples];
 	}
 
 	stateFineTune = new shift_limited_unroll_C_sse_data_t();
@@ -137,10 +138,9 @@ RadioHandlerClass::RadioHandlerClass() :
 RadioHandlerClass::~RadioHandlerClass()
 {
 	for (int n = 0; n < QUEUE_SIZE; n++) {
-		delete[] obuffers[n];
 		delete[] buffers[n];
 	}
-
+	delete[] obuffers_all;
 	delete stateFineTune;
 }
 
@@ -196,7 +196,7 @@ bool RadioHandlerClass::Init(fx3class* Fx3, void (*callback)(float*, uint32_t), 
 	hardware->Initialize(adcrate);
 	DbgPrintf("%s | firmware %x\n", hardware->getName(), firmware);
 	this->r2iqCntrl = r2iqCntrl;
-	r2iqCntrl->Init(hardware->getGain(), buffers, obuffers);
+	r2iqCntrl->Init(hardware->getGain(), buffers, obuffers_all, &num_joint_obuffers, &joint_num_samples);
 
 	return true;
 }

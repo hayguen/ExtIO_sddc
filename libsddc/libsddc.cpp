@@ -22,9 +22,11 @@ static void Callback(float* data, uint32_t len)
 }
 
 class rawdata : public r2iqControlClass {
-    void Init(float gain, int16_t** buffers, float** obuffers) override
+    void Init(float gain, int16_t** buffers, float* obuffers, int* num_joint_obuffers, int* joint_num_samples) override
     {
         this->buffers = buffers;
+        *num_joint_obuffers = 1;
+        *joint_num_samples = -1;
         idx = 0;
     }
 

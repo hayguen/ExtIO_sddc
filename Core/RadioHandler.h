@@ -80,7 +80,9 @@ private:
 
     // transfer variables
     int16_t* buffers[QUEUE_SIZE];
-    float* obuffers[QUEUE_SIZE];
+    float* obuffers_all;
+    int num_joint_obuffers;
+    int joint_num_samples;
 
     // threads
     std::thread adc_samples_thread;

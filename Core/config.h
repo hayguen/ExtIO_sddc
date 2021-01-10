@@ -49,7 +49,8 @@ inline void null_func(const char *format, ...) { }
 #define SETTINGS_IDENTIFIER	"sddc_1.05"
 #define SWNAME				"ExtIO_sddc.dll"
 
-#define	QUEUE_SIZE 64
+//#define	QUEUE_SIZE 64
+#define	QUEUE_SIZE 66
 #define WIDEFFTN  // test FFTN 8192 
 
 #define FFTN_R_ADC (8192)       // FFTN used for ADC real stream DDC  tested at  2048, 8192, 32768, 131072
@@ -65,7 +66,7 @@ enum rf_mode { NOMODE = 0, HFMODE = 0x1, VHFMODE = 0x2 };
 #define HF_HIGH (32000000)    // 32M
 #define MW_HIGH ( 2000000)
 
-#define EXT_BLOCKLEN		512	* 64	/* 32768 only multiples of 512 */
+#define EXT_BLOCKLEN		512	* 64	/* 32768 only multiples of 512 == 131072 / 2.  with 2 == real2complex ratio */
 
 #define RFDDCNAME ("NVIA L768M256")
 #define RFDDCVER ("v 1.0")

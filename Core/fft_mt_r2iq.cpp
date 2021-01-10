@@ -29,7 +29,7 @@ The name r2iq as Real 2 I+Q stream
 
 // default was 1
 // 0 re-uses the real fft plan
-#define FILTER_SPEC_WITH_CPLX_FFT  1
+#define FILTER_SPEC_WITH_CPLX_FFT  0
 #if FILTER_SPEC_WITH_CPLX_FFT
 // when creating new plan anyway .. 1 or 2 allowed.  1 performs better
 #define FILTER_DIM_FACTOR  1
@@ -44,6 +44,37 @@ The name r2iq as Real 2 I+Q stream
     RESULT[0] = A[0] * B[0] + A[1] * B[1]; \
     RESULT[1] = A[1] * B[0] - A[0] * B[1]; \
   } while (0)
+
+
+static BufferModValues g_modValues_div2[64] =
+{
+  { 0,  8192, 65536, 16 },  // 1
+};
+
+static BufferModValues g_modValues_div4[66] =
+{
+  { 0,  8192, 67584, 10 },  // 1
+  { 0, 12288, 61440, 11 },  // 2
+  { 0, 10240, 67584, 11 },  // 3
+};
+
+static BufferModValues g_modValues_div8[70] =
+{
+  { 0,  8192, 71680,  9 },  // 1
+  { 0,  9216, 64512,  9 },  // 2
+  { 0, 10240, 64512,  9 },  // 3
+  { 0, 11264, 64512,  9 },  // 4
+  { 0, 12288, 64512,  9 },  // 5
+  { 0, 13312, 64512,  9 },  // 6
+  { 0, 14336, 64512, 10 },  // 7
+};
+
+static BufferMods g_bufferMods[3] =
+{
+  { 1, 64, 0, 0, 0, &g_modValues_div2[0] }, // div=2; divLog2=1
+  { 3, 66, 0, 0, 0, &g_modValues_div4[0] }, // div=4; divLog2=2
+  { 7, 70, 0, 0, 0, &g_modValues_div8[0] }, // div=8; divLog2=3
+};
 
 
 struct r2iqThreadArg {
@@ -70,6 +101,38 @@ struct r2iqThreadArg {
 
 r2iqControlClass::r2iqControlClass()
 {
+	for (unsigned divIdx = 0; divIdx < sizeof(g_bufferMods) / sizeof(g_bufferMods[0]); ++divIdx)
+	{
+		const int RepCount = g_bufferMods[divIdx].RepCount;
+		const int Queue_Size = g_bufferMods[divIdx].Queue_Size;
+		BufferModValues* modValues = g_bufferMods[divIdx].modValues;
+		int maxTimeBuffer = 0;
+		int maxNumFFTs = 0;
+		int sumNumFFTs = 0;
+		int prevSumFFTs = 0;
+		for (int k = 0; k < RepCount; ++k)
+		{
+			// content good
+			// update .prevSumFFTs
+			modValues[k].prevSumFFTs = prevSumFFTs;
+			maxTimeBuffer = std::max(maxTimeBuffer, modValues[k].prevCopyCount + transferSamples);
+			maxNumFFTs = std::max(maxNumFFTs, modValues[k].numFFTs);
+			sumNumFFTs += modValues[k].numFFTs;
+			prevSumFFTs += modValues[k].numFFTs;
+		}
+		for (int k = RepCount; k < Queue_Size; ++k)
+		{
+			// copy content
+			modValues[k] = modValues[k % RepCount];
+			modValues[k].prevSumFFTs = prevSumFFTs;
+			sumNumFFTs += modValues[k].numFFTs;
+			prevSumFFTs += modValues[k].numFFTs;
+		}
+		g_bufferMods[divIdx].maxTimeBuffer = maxTimeBuffer;
+		g_bufferMods[divIdx].maxNumFFTs = maxNumFFTs;
+		g_bufferMods[divIdx].sumNumFFTs = sumNumFFTs;
+	}
+
 	r2iqOn = false;
 	randADC = false;
 	sideband = false;
@@ -102,14 +165,9 @@ fft_mt_r2iq::fft_mt_r2iq() :
 	r2iqControlClass()
 {
 	halfFft = FFTN_R_ADC / 2;    // half the size of the first fft at ADC 64Msps real rate (2048)
-	fftPerBuf = transferSize / sizeof(short) / (3 * halfFft / 2) + 1; // number of ffts per buffer with 256|768 overlap
+	//fftPerBuf = transferSamples / (3 * halfFft / 2) + 1; // number of ffts per buffer with 256|768 overlap
 
 	mtunebin = halfFft / 4;
-	mInvFftDim[0] = halfFft;
-	for (int i = 1; i < NDECIDX; i++)
-	{
-		mInvFftDim[i] = mInvFftDim[i - 1] / 2;
-	}
 	GainScale = BBRF103_GAINFACTOR;
 
 #ifndef NDEBUG
@@ -206,11 +264,10 @@ void fft_mt_r2iq::DataReady()
 		cvADCbufferAvailable.notify_all(); // signal data available
 }
 
-void fft_mt_r2iq::Init(float gain, int16_t **buffers, float** obuffers)
+void fft_mt_r2iq::Init(float gain, int16_t** buffers, float* obuffers, int* num_joint_obuffers, int* joint_num_samples)
 {
 	this->buffers = buffers;    // set to the global exported by main_loop
 	this->obuffers = obuffers;  // set to the global exported by main_loop
-
 	this->GainScale = gain;
 
 	fftwf_import_wisdom_from_filename("wisdom");
@@ -222,6 +279,34 @@ void fft_mt_r2iq::Init(float gain, int16_t **buffers, float** obuffers)
 	if (processor_count > N_MAX_R2IQ_THREADS)
 		processor_count = N_MAX_R2IQ_THREADS;
 
+	const float Astop = 120.0f;
+	const float relPass = 0.85f;  // 85% of Nyquist should be usable
+	const float relStop = 1.1f;   // 'some' alias back into transition band is OK
+	const int N = 8192;
+	int maxTimeBuffer = 0;
+	int maxNumFFTs = 0;
+	for (int d = 0; d < NDECIDX; d++)
+	{
+		float Bw = 64.0f / mratio[d];
+		// Bw *= 0.8f;  // easily visualize Kaiser filter's response
+		int ntaps = KaiserWindow(0, Astop, relPass * Bw / 128.0f, relStop * Bw / 128.0f, nullptr);
+		//int filterDivLog2 = Fast_R2C_Decimation::filterDivLog2ForRequiredTaps(ntaps, N);
+		int filterDivLog2 = 2;  // just 2^2 = 4 for the begin
+		mDecimCore[d] = Fast_R2C_Decimation(N, filterDivLog2, d);
+		mBufferMods[d] = &g_bufferMods[1];
+		maxNumFFTs = std::max(maxNumFFTs, mBufferMods[d]->maxNumFFTs);
+		maxTimeBuffer = std::max(maxTimeBuffer, mBufferMods[d]->maxTimeBuffer);
+		assert(mBufferMods[d]->Queue_Size == QUEUE_SIZE);
+	}
+
+	for (int k = 1; k < QUEUE_SIZE; ++k)
+	{
+		const int decimate = this->mdecimation;
+		const BufferMods& bufferMods = *(this->mBufferMods[decimate]);
+		//this->obuffers[k] = obuffers[0] + k * bufferMods.Queue_Size;
+	}
+
+
 	// prepare all FFTs - before filter design in case FILTER_SPEC_WITH_CPLX_FFT == 0
 	{
 		for (unsigned t = 0; t < processor_count; t++)
@@ -229,7 +314,8 @@ void fft_mt_r2iq::Init(float gain, int16_t **buffers, float** obuffers)
 			r2iqThreadArg* th = new r2iqThreadArg();
 			threadArgs[t] = th;
 
-			th->ADCinTime = (float*)fftwf_malloc(sizeof(float) * (halfFft + transferSamples));
+			th->ADCinTime = (float*)fftwf_malloc(sizeof(float) * maxTimeBuffer);
+			std::fill(th->ADCinTime, th->ADCinTime + maxTimeBuffer, 0.0f);  // especially for 1st block
 			th->ADCinFreq = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * (halfFft + 1)); // 4096+1
 			th->inFreqTmp = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * (halfFft));    // 4096
 			th->outTimeTmp = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * (halfFft));
@@ -238,14 +324,14 @@ void fft_mt_r2iq::Init(float gain, int16_t **buffers, float** obuffers)
 		plan_t2f_r2c = fftwf_plan_dft_r2c_1d(2 * halfFft, threadArgs[0]->ADCinTime, threadArgs[0]->ADCinFreq, FFTW_MEASURE);
 		for (int d = 0; d < NDECIDX; d++)
 		{
-			plans_f2t_c2c[d] = fftwf_plan_dft_1d(mInvFftDim[d], threadArgs[0]->inFreqTmp, threadArgs[0]->outTimeTmp, FFTW_BACKWARD, FFTW_MEASURE);
+			const int invFftDim = mDecimCore[d].invDim;  // mInvFftDim[d]
+			plans_f2t_c2c[d] = fftwf_plan_dft_1d(invFftDim, threadArgs[0]->inFreqTmp, threadArgs[0]->outTimeTmp, FFTW_BACKWARD, FFTW_MEASURE);
 		}
 	}
 
 	// design lowpass filter and compute it's spectrum
 	{
 		DbgPrintf((char*)"r2iqCntrl initialization\n");
-		const int filterTaps = halfFft / 4 + 1;
 		const int filterFftDim = FILTER_DIM_FACTOR * halfFft;  // initially just halfFft
 
 		// filters
@@ -254,6 +340,7 @@ void fft_mt_r2iq::Init(float gain, int16_t **buffers, float** obuffers)
 			filterHw[d] = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * filterFftDim);     // halfFft
 		}
 #if FILTER_SPEC_WITH_CPLX_FFT
+		const int filterTaps = halfFft / 4 + 1;
 		fftwf_complex* pfilterht;       // time filter ht
 		pfilterht = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * filterFftDim);     // halfFft
 
@@ -266,9 +353,6 @@ void fft_mt_r2iq::Init(float gain, int16_t **buffers, float** obuffers)
 		float* pht = threadArgs[0]->ADCinTime;
 		const float gainadj = gain * 2048.0f / (float)FFTN_R_ADC; // reference is FFTN_R_ADC == 2048
 #endif
-		const float Astop = 120.0f;
-		const float relPass = 0.85f;  // 85% of Nyquist should be usable
-		const float relStop = 1.1f;   // 'some' alias back into transition band is OK
 		for (int d = 0; d < NDECIDX; d++)
 		{
 			// @todo: have dynamic bandpass filter size - depending on decimation
@@ -286,6 +370,7 @@ void fft_mt_r2iq::Init(float gain, int16_t **buffers, float** obuffers)
 
 			fftwf_execute_dft(filterplan_t2f_c2c, pfilterht, filterHw[d]);
 #else
+			const int filterTaps = mDecimCore[d].filterLen;
 			for (int t = 0; t < filterFftDim; t++)
 				pht[t] = 0.0f;
 
@@ -312,7 +397,11 @@ void fft_mt_r2iq::Init(float gain, int16_t **buffers, float** obuffers)
 void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 
 	const int decimate = this->mdecimation;
-	const int invFftDim= this->mInvFftDim[decimate];	// = halfFft / 2^mdecimation
+	const Fast_R2C_Decimation &decimCore = this->mDecimCore[decimate];
+	const BufferMods& bufferMods = *(this->mBufferMods[decimate]);
+
+	//const int invFftDim= this->mInvFftDim[decimate];	// = halfFft / 2^mdecimation
+	const int invFftDim = decimCore.invDim;
 	const int mratio = this->getRatio();
 	const fftwf_complex* filterHwPos = filterHw[decimate];
 	const int filterFftDim = FILTER_DIM_FACTOR * halfFft;  // initially just halfFft
@@ -323,6 +412,7 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 		const int16_t *dataADC;  // pointer to input data
 		const float *endloop;    // pointer to end data to be copied to beginning
 		float * pout;
+		int work_bufIdx = 0;
 
 		const int _mtunebin = this->mtunebin;  // Update LO tune is possible during run
 
@@ -343,20 +433,26 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 			dataADC = this->buffers[this->bufIdx];
 			std::atomic_fetch_sub(&this->cntr, 1);
 
-			int modx = this->bufIdx / mratio;
-			int moff = this->bufIdx - modx * mratio;
-			int offset = ((transferSize / sizeof(int16_t)) / mratio) * moff;
-			pout = this->obuffers[modx] + offset;
+			work_bufIdx = this->bufIdx;
+			const int modx = work_bufIdx / mratio;
+			//const int moff = work_bufIdx - modx * mratio;
+			//const int offset = (transferSamples / mratio) * moff;
+			const int offset = bufferMods.modValues[work_bufIdx].prevSumFFTs * decimCore.invDim;
+			//pout = this->obuffers[modx] + offset;
+			pout = this->obuffers + offset;
 
 			this->bufIdx = (this->bufIdx + 1) % QUEUE_SIZE;
 
-			endloop = lastThread->ADCinTime + transferSize / sizeof(int16_t);
+			endloop = lastThread->ADCinTime;
 			lastThread = th;
 		}
 
+		const BufferModValues& modValues = bufferMods.modValues[work_bufIdx];
+
 		// first frame
 		auto inloop = th->ADCinTime;
-		for (int m = 0; m < halfFft; m++) {
+		endloop += modValues.prevCopyOff;
+		for (int m = 0; m < modValues.prevCopyCount; ++m) {
 			*inloop++ = *endloop++;   // duplicate from last frame halfFft samples
 		}
 
@@ -425,6 +521,8 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 		const auto source2 = &th->ADCinFreq[_mtunebin - invFftDim / 2];
 		const auto filterHwNeg = &filterHwPos[filterFftDim - invFftDim / 2];
 		const auto dest = &th->inFreqTmp[invFftDim / 2];
+
+		const int fftPerBuf = modValues.numFFTs;
 		for (int k = 0; k < fftPerBuf; k++)
 		{
 			// core of fast convolution including filter and decimation
@@ -433,7 +531,7 @@ void * fft_mt_r2iq::r2iqThreadf(r2iqThreadArg *th) {
 			{
 				// FFT first stage: time to frequency, real to complex
 				// 'full' transformation size: 2 * halfFft
-				fftwf_execute_dft_r2c(plan_t2f_r2c, th->ADCinTime + (3 * halfFft / 2) * k, th->ADCinFreq);
+				fftwf_execute_dft_r2c(plan_t2f_r2c, th->ADCinTime + decimCore.inputStep * k, th->ADCinFreq);
 				// result now in th->ADCinFreq[]
 
 				// circular shift (mixing in full bins) and low/bandpass filtering (complex multiplication)
